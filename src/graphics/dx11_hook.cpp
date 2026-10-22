@@ -28,6 +28,8 @@ namespace ts_extra_utilities
     WNDPROC original_wndproc;
 
     extern void ts_shutdown_mark( const char* step );
+    extern void ts_note_present();
+    extern void ts_arm_exit_watchdog();
 
     LRESULT __stdcall WndProcD3D( HWND hwnd, UINT umsg, WPARAM wparam, LPARAM lparam )
     {
@@ -37,6 +39,7 @@ namespace ts_extra_utilities
         if ( umsg == WM_DESTROY || umsg == WM_CLOSE )
         {
             ts_shutdown_mark( umsg == WM_DESTROY ? "WM_DESTROY on game window" : "WM_CLOSE on game window" );
+            ts_arm_exit_watchdog();
         }
         if ( !g_shutting_down.load( std::memory_order_acquire ) && CCore::g_instance != nullptr
             && CCore::g_instance->on_wnd_proc( hwnd, umsg, wparam, lparam ) )
@@ -139,6 +142,7 @@ namespace ts_extra_utilities
     HRESULT hk_present( IDXGISwapChain* swap_chain, const UINT sync_interval, const UINT flags )
     {
         const detour_call_guard_t detour_guard;
+        ts_note_present();
         on_present( swap_chain );
         const auto hr = present_hook->get_original< present_fn >()( swap_chain, sync_interval, flags );
         --present_depth;
@@ -148,6 +152,7 @@ namespace ts_extra_utilities
     HRESULT hk_present1( IDXGISwapChain1* swap_chain, const UINT sync_interval, const UINT flags, const DXGI_PRESENT_PARAMETERS* params )
     {
         const detour_call_guard_t detour_guard;
+        ts_note_present();
         on_present( swap_chain );
         const auto hr = present1_hook->get_original< present1_fn >()( swap_chain, sync_interval, flags, params );
         --present_depth;

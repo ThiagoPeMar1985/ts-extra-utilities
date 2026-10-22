@@ -32,6 +32,33 @@ namespace
         fclose( f );
     }
 
+    // The game can hang in its own teardown after the save completes — a
+    // known engine bug spins forever unregistering loaders and the process
+    // never exits (see the endless "[mem] Attempt to unregister" spam).
+    // WndProcD3D arms the watchdog on WM_CLOSE/WM_DESTROY; it only fires if
+    // the render loop is also dead, so a window recreation (fullscreen
+    // toggle) never triggers it. A normal shutdown disarms it.
+    std::atomic< uint64_t > g_close_armed_ms{ 0 };
+    std::atomic< uint64_t > g_last_present_ms{ 0 };
+
+    DWORD WINAPI exit_watchdog( LPVOID )
+    {
+        for ( ;; )
+        {
+            Sleep( 500 );
+            const uint64_t armed = g_close_armed_ms.load( std::memory_order_acquire );
+            if ( armed == 0 ) continue;
+            const uint64_t now = GetTickCount64();
+            const uint64_t last = g_last_present_ms.load( std::memory_order_acquire );
+            if ( now - armed >= 15000 && ( last == 0 || now - last >= 5000 ) )
+            {
+                trace_close( "watchdog: teardown stalled %llums after close, forcing exit",
+                             static_cast< unsigned long long >( now - armed ) );
+                TerminateProcess( GetCurrentProcess(), 0 );
+            }
+        }
+    }
+
     LONG WINAPI close_crash_trace( EXCEPTION_POINTERS* ep )
     {
         const DWORD code = ep->ExceptionRecord->ExceptionCode;
@@ -75,6 +102,21 @@ namespace ts_extra_utilities
     {
         trace_close( "shutdown: %s", step );
     }
+
+    void ts_note_present()
+    {
+        g_last_present_ms.store( GetTickCount64(), std::memory_order_release );
+    }
+
+    void ts_arm_exit_watchdog()
+    {
+        g_close_armed_ms.store( GetTickCount64(), std::memory_order_release );
+    }
+
+    void ts_disarm_exit_watchdog()
+    {
+        g_close_armed_ms.store( 0, std::memory_order_release );
+    }
 }
 
 __declspec(dllexport) SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version, const scs_telemetry_init_params_t* const params )
@@ -84,6 +126,7 @@ __declspec(dllexport) SCSAPI_RESULT scs_telemetry_init( const scs_u32_t version,
     {
         handler_registered = true;
         AddVectoredExceptionHandler( 0, close_crash_trace );
+        CreateThread( nullptr, 0, exit_watchdog, nullptr, 0, nullptr );
     }
 
     auto* init_params = static_cast< const scs_telemetry_init_params_v100_t* >( params );
@@ -103,6 +146,7 @@ __declspec(dllexport) SCSAPI_VOID scs_telemetry_shutdown( void )
     // and stops touching game/plugin state. Then wait briefly for calls already
     // in flight so destroy() never frees objects mid-use (quit crash/hang).
     ts_extra_utilities::g_shutting_down.store( true, std::memory_order_release );
+    ts_extra_utilities::ts_disarm_exit_watchdog();
     trace_close( "shutdown: flag set, draining detours" );
     for ( int i = 0; i < 100 && ts_extra_utilities::g_detour_depth.load( std::memory_order_acquire ) > 0; ++i )
     {
